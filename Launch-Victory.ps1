@@ -110,6 +110,18 @@ $launch.Add_Click({
         $launch.Enabled = $false
         $status.Text = "Victory running. Preparing shaders and pipelines. Logs: $stateDir"
         $timer.Start()
+        # The runtime writes its logs independently of the viewer. Closing
+        # the viewer does not terminate the game or interrupt logging.
+        try {
+            $viewer = Join-Path $root 'Watch-Victory.ps1'
+            Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -ArgumentList @(
+                '-NoProfile', '-NoExit', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $viewer + '"'),
+                '-OutputLog', ('"' + $log + '"'), '-ErrorLog', ('"' + $err + '"'),
+                '-RuntimeId', $script:child.Id
+            ) -WorkingDirectory $root
+        } catch {
+            $status.Text = "Victory running; live terminal could not open. Logs: $stateDir"
+        }
     } catch { [Windows.Forms.MessageBox]::Show($_.Exception.Message,'Victory RTX') | Out-Null }
 })
 $timer = New-Object Windows.Forms.Timer
