@@ -96,6 +96,11 @@ enum Command {
         #[arg(long)]
         warm: Option<PathBuf>,
     },
+    #[cfg(windows)]
+    #[command(hide = true)]
+    PrepareLaunch {
+        root: PathBuf,
+    },
     /// Translate every shader found (as `translate` finds them) into the
     /// shader cache, so that no run has to: a few minutes, once per change
     /// of the translator.
@@ -214,6 +219,14 @@ fn main() -> Result<()> {
             translate::run(paths, validate, pipelines, list, jobs)
         }
         Command::Shaders { paths, jobs } => translate::precompile(paths, jobs),
+        #[cfg(windows)]
+        Command::PrepareLaunch { root } => {
+            translate::precompile_for_run(vec![root])?;
+            let cfg = victory_core::Config::load()?;
+            std::fs::create_dir_all(cfg.cache_subdir("shaders")?.with_file_name("pipelines"))?;
+            println!("Preparing previously recorded pipelines...");
+            warm::run(None, None, false, true, None)
+        }
         #[cfg(windows)]
         Command::Warm { jobs, limit, again, used, these } => warm::run(jobs, limit, again, used, these),
         Command::Run {

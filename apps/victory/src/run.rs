@@ -53,6 +53,18 @@ pub fn run(
     // A title that relaunched itself: the old process must be gone first.
     victory_hle::modules::lifecycle::wait_for_previous();
     let cfg = victory_core::Config::load()?;
+    if execute {
+        let shader_root = cfg.game_dir.clone().unwrap_or_else(|| {
+            exe.parent().unwrap_or(Path::new(".")).to_path_buf()
+        });
+        println!("Preparing GPU-specific shader cache in a separate process...");
+        let status = std::process::Command::new(std::env::current_exe()?)
+            .arg("prepare-launch")
+            .arg(&shader_root)
+            .status()
+            .context("starting the ahead-of-time preparation worker")?;
+        anyhow::ensure!(status.success(), "ahead-of-time preparation worker exited with {status}");
+    }
     let original = std::fs::read(exe).with_context(|| format!("reading {}", exe.display()))?;
     let prepared = victory_loader::prepare(&original)?;
     let hash = prepared.original_hash.to_hex();

@@ -168,7 +168,20 @@ pub(crate) fn ready(p: &Arc<Pending>) -> Option<&HostPipeline> {
         start(p, REQUESTED);
         wait(p, crate::frame::current());
     }
-    p.made.get()?.as_ref()
+    // Never silently discard a requested draw because its pipeline failed
+    // or is still compiling. A cold pipeline can stall the title; prewarming
+    // recorded pipelines on the next launch avoids that work.
+    if p.made.get().is_none() {
+        tracing::warn!(pipeline = %p.key, shaders = %hashes(p), "waiting for required host pipeline");
+        p.make();
+    }
+    match p.made.get().and_then(|made| made.as_ref()) {
+        Some(host) => Some(host),
+        None => {
+            tracing::error!(pipeline = %p.key, shaders = %hashes(p), "required host pipeline unavailable; stopping rather than dropping rendering work");
+            std::process::exit(1);
+        }
+    }
 }
 
 /// Makes `p` on this thread if it is not made yet (waiting for a worker

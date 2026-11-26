@@ -92,6 +92,8 @@ mod intersect_tests;
 pub mod host;
 mod lower;
 mod own_bits;
+mod paired;
+mod paired_lower;
 #[cfg(all(test, windows))]
 mod permlane_tests;
 mod rect;
@@ -465,15 +467,7 @@ pub fn emit(
             }
         };
         let done = |r: &Result<(HostShader, Option<u32>), ShaderError>| matches!(r, Ok((_, wave)) if *wave != Some(64));
-        // Each host wave as a wave of its own (`lower::with_local_waves`),
-        // for programs still stopped where not every lane runs.
-        let local_on = std::env::var_os("VICTORY_WAVE_LOCAL").is_none_or(|v| v != "0");
-        // Where the wave operations are the allocation idiom
-        // ([`lower::wave_local`]) that is exact. Other programs are taken
-        // the same way last of all, each half-wave giving its own results
-        // (approximate: a tile-wide result becomes two half-tile ones);
-        // `VICTORY_WAVE_LOCAL=idiom` refuses those instead.
-        let strict = std::env::var_os("VICTORY_WAVE_LOCAL").is_some_and(|v| v == "idiom");
+        // Only the proven allocation idiom may split a console wave.
         let idiom = |p: &ir::Program, st: &structure::Structured| match lower::wave_local(p, st) {
             Ok(()) => true,
             Err((offset, what)) => {
@@ -506,92 +500,44 @@ pub fn emit(
                 }
             }
         }
-        // Off unless asked for (`VICTORY_WAVE_WIDE=1`), for a console wave run as two host
-        // waves: this form puts group barriers inside branches and loops, and runs 121-124
-        // lost the card in a submission of two programs that had just moved to it
-        // (`ptfx_CS_lightAtlas_Sprite` and `_Trail`). The 32-lane programs' form below, which
-        // has no barrier, stays on.
-        let wide_on = std::env::var_os("VICTORY_WAVE_WIDE").is_some_and(|v| v == "1");
-        // exact first: each host wave on its own where that is exact (the idiom, every
-        // form; no barriers), then the other exact forms; then approximate
-        for exact in [true, false] {
-            if !exact {
-                // Before anything approximate, the exact forms that cost group barriers.
-                // Every skip left out that the code after it cannot see
-                // ([`ir::without_skips`], `deep`): most of the body is then code every
-                // lane runs, where the two host waves can exchange.
-                // (`VICTORY_WAVE_DEEP_SKIPS=0` and `VICTORY_WAVE_WIDE=0` turn the two off.)
-                let deep_on = std::env::var_os("VICTORY_WAVE_DEEP_SKIPS").is_none_or(|v| v != "0");
-                let deep = if deep_on { form(ir::without_skips(p, true)) } else { None };
-                if let Some((p, st, io, res)) = &deep {
-                    let again = emit_program(c, native, p, st, io, res);
-                    report("without skips, scalars followed", &again);
-                    if done(&again) {
-                        return again.map(|(shader, _)| shader);
-                    }
-                }
-                // Still stopped where not every lane runs: the per-lane branches around
-                // those places taken as the console takes them, by the whole wave at once
-                // ([`widen`]), at two group barriers per such branch.
-                if wide_on {
-                    let bases = [
-                        deep.as_ref().map(|f| &f.0),
-                        forms[1].1.as_ref().map(|f| &f.0),
-                        forms[0].1.as_ref().map(|f| &f.0),
-                        Some(p),
-                    ];
-                    if let Some(base) = bases.into_iter().flatten().next() {
-                        let again = widen(c, native, base, why);
-                        report("wave-wide branches", &again);
-                        if done(&again) {
-                            return again.map(|(shader, _)| shader);
-                        }
-                    }
-                }
-                if strict {
-                    break;
-                }
-            }
-            if !local_on || exact_only {
-                continue;
-            }
-            for (name, f) in &forms {
+        // Exact allocation idioms first: no cross-warp barriers.
+        if !exact_only {
+            for (_, f) in &forms {
                 if let Some((p, st, io, res)) = f
-                    && idiom(p, st) == exact
+                    && idiom(p, st)
                 {
                     let local = lower::with_local_waves(|| emit_program(c, native, p, st, io, res));
-                    report(&format!("local waves ({}), {name}", if exact { "idiom" } else { "APPROXIMATE" }), &local);
                     if done(&local) {
                         return local.map(|(shader, _)| shader);
                     }
                 }
             }
-            if idiom(p, st) == exact {
+            if idiom(p, st) {
                 let local = lower::with_local_waves(|| emit_program(c, native, p, st, io, res));
-                report(if exact { "local waves (idiom)" } else { "local waves (APPROXIMATE)" }, &local);
                 if done(&local) {
                     return local.map(|(shader, _)| shader);
                 }
             }
         }
-        if local_on && !exact_only {
-            // Last: every mask and lane read per host wave.
-            if !strict {
-                for (name, f) in &forms {
-                    if let Some((p, st, io, res)) = f {
-                        let local = lower::with_local_waves_any(|| emit_program(c, native, p, st, io, res));
-                        report(&format!("local waves (APPROXIMATE, any mask), {name}"), &local);
-                        if done(&local) {
-                            return local.map(|(shader, _)| shader);
-                        }
-                    }
-                }
-                let local = lower::with_local_waves_any(|| emit_program(c, native, p, st, io, res));
-                report("local waves (APPROXIMATE, any mask)", &local);
-                if done(&local) {
-                    return local.map(|(shader, _)| shader);
-                }
+        // Do not widen divergent branches with group barriers on Wave32 hosts.
+        if let Some((p, st, io, res)) = form(ir::without_skips(p, true)) {
+            let again = emit_program(c, native, &p, &st, &io, &res);
+            report("without skips, scalars followed", &again);
+            if done(&again) {
+                return again.map(|(shader, _)| shader);
             }
+        }
+        // Last exact fallback: preserve the original scalar control flow and
+        // logical Wave64 masks. The scheduler never puts group barriers inside
+        // wave-dependent branches. Refuse unimplemented instructions rather
+        // than emitting an approximation.
+        match paired_lower::lower(native, p, io, res) {
+            Ok(shader) => {
+                if why { eprintln!("WAVE64-RETRY paired scheduler: wave Some(32)"); }
+                return Ok(shader);
+            }
+            Err(e) if why => eprintln!("WAVE64-RETRY paired scheduler: {e}"),
+            Err(_) => {}
         }
     }
     // SCC of a mask operation joined with a scalar test behind a per-lane skip (the 32-lane
@@ -601,6 +547,7 @@ pub fn emit(
         Err(ShaderError::Unsupported { what, .. })
             if native.stage == HwStage::Cs
                 && what == lower::LANE_MASK
+                && !(native.wave64 && lower::host_max_wave() == 32)
                 && std::env::var_os("VICTORY_WAVE_WIDE").is_none_or(|v| v != "0") =>
         {
             let again = widen(c, native, p, std::env::var_os("VICTORY_WAVE_WHY").is_some());
@@ -611,7 +558,7 @@ pub fn emit(
         }
         other => other,
     };
-    let original = original.map(|(shader, _)| shader);
+    let original = require_host_wave(original);
     // Retry unsupported programs only. Threading can separate an unknown
     // register value from its apparent use on a mutually exclusive path.
     if !matches!(original, Err(ShaderError::Unsupported { .. })) {
@@ -625,7 +572,21 @@ pub fn emit(
     let st = structure::structure(&p)?;
     let io = io::raise(&p, native)?;
     let res = resource::track(&p, &native.layout, native.stage, Some(&st))?;
-    emit_program(c, native, &p, &st, &io, &res).map(|(shader, _)| shader)
+    require_host_wave(emit_program(c, native, &p, &st, &io, &res))
+}
+
+fn require_host_wave(result: Result<(HostShader, Option<u32>), ShaderError>) -> Result<HostShader, ShaderError> {
+    result.and_then(|(shader, wave)| {
+        let max = lower::host_max_wave();
+        if max != 0 && wave.is_some_and(|size| size > max) {
+            Err(ShaderError::Unsupported {
+                offset: 0,
+                what: "shader requires a wave wider than the host supports",
+            })
+        } else {
+            Ok(shader)
+        }
+    })
 }
 
 /// `p` (a console wave64 compute program on a host of 32-lane waves) with the per-lane
