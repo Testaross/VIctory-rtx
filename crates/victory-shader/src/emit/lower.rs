@@ -2899,6 +2899,10 @@ impl<'a> Lower<'a> {
     /// Use the very same copy slot and offset as the store. The high word is
     /// unmasked for diagnosis; the directory uses only its low eight bits.
     fn trace_raw_write(&mut self, [lo, hi]: [V; 2], copy: V, byte: V, mapped: V, width: u32) {
+        // Only compute dispatches have the corresponding ordered snapshot.
+        if self.x.native.stage != crate::HwStage::Cs {
+            return;
+        }
         use super::{RAW_STORE_PROBE_BASE, RAW_STORE_PROBE_CAPACITY, RAW_STORE_PROBE_EVENT_DWORDS, SLOT_FAULTS};
 
         let active = self.begin_guarded(Some(mapped));
