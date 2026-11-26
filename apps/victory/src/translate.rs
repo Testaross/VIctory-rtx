@@ -396,6 +396,18 @@ pub fn run(
 
 /// Every shader found into the cache runs translate from.
 pub fn precompile(paths: Vec<PathBuf>, jobs: Option<usize>) -> Result<()> {
+    precompile_impl(paths, jobs, true)
+}
+
+/// Startup scans archives speculatively; a discovered shader is not
+/// necessarily a shader the title will bind. Keep failures visible and
+/// let the runtime reject an unavailable pipeline when actually requested.
+#[cfg(windows)]
+pub fn precompile_for_run(paths: Vec<PathBuf>) -> Result<()> {
+    precompile_impl(paths, None, false)
+}
+
+fn precompile_impl(paths: Vec<PathBuf>, jobs: Option<usize>, require_all: bool) -> Result<()> {
     let cfg = victory_core::Config::load()?;
     victory_hle::modules::d3d12x::use_shader_cache(cfg.cache_subdir("shaders")?);
     let paths = crate::default_paths(paths)?;
@@ -475,7 +487,11 @@ pub fn precompile(paths: Vec<PathBuf>, jobs: Option<usize>) -> Result<()> {
         println!("  {n:>5}  {why}  (e.g. {hash})");
     }
     anyhow::ensure!(done.load(Ordering::Relaxed) > 0, "no shaders successfully cached");
-    anyhow::ensure!(failed_count == 0, "{failed_count} shaders failed translation");
+    if require_all {
+        anyhow::ensure!(failed_count == 0, "{failed_count} shaders failed translation");
+    } else if failed_count != 0 {
+        eprintln!("AOT: {failed_count} discovered shaders are unsupported; continuing to runtime validation. Required unavailable pipelines will stop execution.");
+    }
     Ok(())
 }
 
