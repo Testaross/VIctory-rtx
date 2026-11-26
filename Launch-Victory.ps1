@@ -104,6 +104,13 @@ $launch.Add_Click({
         @{folder=$game;exe=$title} | ConvertTo-Json | Set-Content -LiteralPath $settings -Encoding UTF8
         $env:VICTORY_GAME_DIR = $game
         $stamp = Get-Date -Format 'yyyyMMdd-HHmmss-fff'
+        $captures = Join-Path $stateDir "capture-$stamp"
+        New-Item -ItemType Directory -Force -Path $captures | Out-Null
+        # Diagnostic build captures the actual presented image and pass
+        # sequence, including the steady-state white-screen loop.
+        $env:VICTORY_CAPTURE = $captures
+        $env:VICTORY_CAPTURE_FRAMES = '2,16,64,128,256'
+        $env:VICTORY_PIPELINE_BOOK = '1'
         $log = Join-Path $stateDir "victory-$stamp.log"
         $err = Join-Path $stateDir "victory-$stamp.err.log"
         $script:child = Start-Process -FilePath $runtime -ArgumentList @('run',('"' + $title + '"'),'--execute') -WorkingDirectory $root -RedirectStandardOutput $log -RedirectStandardError $err -PassThru
