@@ -177,6 +177,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn decode_preserves_dword_atomic_and_vector_write_records() {
+        let mut words = Box::new([0u32; RAW_STORE_PROBE_DWORDS as usize]);
+        words[..12].copy_from_slice(&[
+            2, 0,
+            0x1234_0004, 1, 4, 7, 4,
+            0x1234_0008, 1, 16, 7, 8,
+        ]);
+        let trace = decode(&words);
+        assert_eq!(trace.attempted, 2);
+        assert!(!trace.overflow);
+        assert_eq!(trace.stores, [
+            Store { address: 0x1_1234_0004, width: 4, slot: 7, host_byte: 4 },
+            Store { address: 0x1_1234_0008, width: 16, slot: 7, host_byte: 8 },
+        ]);
+    }
+
+    #[test]
     fn snapshot_keeps_records_and_resets_only_trace_header() {
         if std::env::var_os("VICTORY_RAW_STORE_READBACK_PROBE").as_deref() != Some(std::ffi::OsStr::new("1")) {
             return;
