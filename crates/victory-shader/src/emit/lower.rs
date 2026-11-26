@@ -4292,23 +4292,7 @@ impl<'a> Lower<'a> {
         } else {
             self.s.op(at, "waveGetLaneIndex", Attr::ReadOnly, self.s.t.i32, 111, &[])
         };
-        let (k31, k32, one, z) = (
-            self.s.m.i32(31),
-            self.s.m.i32(32),
-            self.s.m.i32(1),
-            self.s.m.i32(0),
-        );
-        let word = match hi {
-            Some(hi) => {
-                let low = self.s.m.cmp(at, pred::IULT, lane, k32);
-                self.s.m.select(at, low, lo, hi)
-            }
-            None => lo,
-        };
-        let sh = self.s.m.bin(at, Bin::And, lane, k31);
-        let t = self.s.m.bin(at, Bin::LShr, word, sh);
-        let t = self.s.m.bin(at, Bin::And, t, one);
-        self.s.m.cmp(at, pred::NE, t, z)
+        super::paired::mask_bit(&mut self.s, at, lo, hi, lane)
     }
 
     /// The value of the high dword of the wave64 register pair whose low
@@ -10141,17 +10125,7 @@ impl<'a> Lower<'a> {
                     let low = self.s.m.cmp(c, pred::IULT, lane, k32);
                     self.s.m.select(c, low, z, t)
                 };
-                // (1 << below) - 1, all ones from 32 on.
-                let (one, k32, ones) = (k(self, 1), k(self, 32), k(self, u32::MAX));
-                let sh = m31(self, below);
-                let m = self.s.m.bin(c, Bin::Shl, one, sh);
-                let m = self.s.m.bin(c, Bin::Sub, m, one);
-                let full = self.s.m.cmp(c, pred::IUGE, below, k32);
-                let m = self.s.m.select(c, full, ones, m);
-                let x = self.s.m.bin(c, Bin::And, a, m);
-                let n = self
-                    .s
-                    .op(c, "unaryBits.i32", Attr::ReadNone, self.s.t.i32, 31, &[x]);
+                let n = super::paired::prefix_word(&mut self.s, c, a, below);
                 self.s.m.bin(c, Bin::Add, n, b)
             }
             _ => return Err(name),
