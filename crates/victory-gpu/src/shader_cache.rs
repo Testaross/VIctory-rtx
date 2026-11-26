@@ -111,7 +111,7 @@ pub(crate) fn host_shader(container: &[u8]) -> Result<HostShader, String> {
         if ray_probe && &hash[..16] == emit::RAY_PROBE_HASH {
             return emit::translate_ray_probe(container).map_err(|e| e.to_string());
         }
-        if raw_store_probe && &hash[..16] == emit::RAW_STORE_PROBE_HASH {
+        if raw_store_probe && emit::raw_store_probe_target() == Some(&hash[..16]) {
             return emit::translate_raw_store_probe(container).map_err(|e| e.to_string());
         }
     }
