@@ -533,6 +533,7 @@ pub fn emit(
         Err(ShaderError::Unsupported { what, .. })
             if native.stage == HwStage::Cs
                 && what == lower::LANE_MASK
+                && !(native.wave64 && lower::host_max_wave() == 32)
                 && std::env::var_os("VICTORY_WAVE_WIDE").is_none_or(|v| v != "0") =>
         {
             let again = widen(c, native, p, std::env::var_os("VICTORY_WAVE_WHY").is_some());
@@ -562,7 +563,8 @@ pub fn emit(
 
 fn require_host_wave(result: Result<(HostShader, Option<u32>), ShaderError>) -> Result<HostShader, ShaderError> {
     result.and_then(|(shader, wave)| {
-        if wave.is_some_and(|size| size > lower::host_max_wave()) {
+        let max = lower::host_max_wave();
+        if max != 0 && wave.is_some_and(|size| size > max) {
             Err(ShaderError::Unsupported {
                 offset: 0,
                 what: "shader requires a wave wider than the host supports",
