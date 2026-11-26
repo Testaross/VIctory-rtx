@@ -6,7 +6,7 @@ use std::sync::OnceLock;
 
 use victory_shader::emit::{
     RAW_STORE_PROBE_BASE, RAW_STORE_PROBE_CAPACITY, RAW_STORE_PROBE_DWORDS,
-    RAW_STORE_PROBE_EVENT_DWORDS, RAW_STORE_PROBE_HASH, SLOT_FAULTS, raw_store_probe_enabled,
+    RAW_STORE_PROBE_EVENT_DWORDS, SLOT_FAULTS, raw_store_probe_target,
 };
 use windows::Win32::Graphics::Direct3D12::*;
 
@@ -26,14 +26,12 @@ struct Owner {
 }
 
 pub(crate) fn after_dispatch(list: &HostList, pipeline: &HostPipeline) {
-    if !raw_store_probe_enabled() {
-        return;
-    }
-    let Some(stage) = pipeline.stages.first().filter(|stage| stage.shader.hash == RAW_STORE_PROBE_HASH) else {
+    let Some(target) = raw_store_probe_target() else { return };
+    let Some(stage) = pipeline.stages.first().filter(|stage| stage.shader.hash == target) else {
         return;
     };
     if !stage.translated().host.root_uavs.contains(&SLOT_FAULTS) {
-        tracing::warn!(shader = RAW_STORE_PROBE_HASH, "raw store trace UAV unavailable");
+        tracing::warn!(shader = target, "raw store trace UAV unavailable");
         return;
     }
     let frame = crate::queue::presented() + 1;
@@ -49,15 +47,15 @@ pub(crate) fn after_dispatch(list: &HostList, pipeline: &HostPipeline) {
         (memory.faults.0.clone(), owners)
     };
     let Some(readback) = snapshot_and_reset(list, &faults) else {
-        tracing::warn!(shader = RAW_STORE_PROBE_HASH, frame, "raw store trace readback unavailable");
+        tracing::warn!(shader = target, frame, "raw store trace readback unavailable");
         return;
     };
     list.defer_after(move || {
         let Some(trace) = read_trace(&readback) else {
-            tracing::warn!(shader = RAW_STORE_PROBE_HASH, frame, "raw store trace map failed");
+            tracing::warn!(shader = target, frame, "raw store trace map failed");
             return;
         };
-        report(frame, trace, &owners);
+        report(target, frame, trace, &owners);
     });
 }
 
@@ -133,7 +131,7 @@ fn read_trace(readback: &ID3D12Resource) -> Option<Trace> {
     }
 }
 
-fn report(frame: u64, trace: Trace, owners: &[Owner]) {
+fn report(target: &str, frame: u64, trace: Trace, owners: &[Owner]) {
     let mut ranges = Vec::with_capacity(trace.stores.len());
     let mut pages = BTreeSet::new();
     let mut slots = BTreeSet::new();
@@ -167,10 +165,10 @@ fn report(frame: u64, trace: Trace, owners: &[Owner]) {
         previous_end = previous_end.max(end);
     }
     tracing::info!(
-        shader = RAW_STORE_PROBE_HASH, frame, attempted_stores = trace.attempted,
+        shader = target, frame, attempted_stores = trace.attempted,
         overflow = trace.overflow, invalid, owner_mismatches, directory_crossings, card_store_events,
         exact_guest_bytes = total, dirty_pages_4k = pages.len(), owner_slots = slots.len(),
-        "mapped raw stores after the GPU fence"
+        "mapped raw writes (stores and atomics) after the GPU fence"
     );
 }
 
