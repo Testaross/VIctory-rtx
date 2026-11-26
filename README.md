@@ -1,4 +1,10 @@
-# DexNom RayTime (AMD)
+# Victory RTX
+
+**NVIDIA-first development fork.** Run `Setup.cmd`, then open **Victory RTX** from the Windows Start menu. There is one default rendering path: strict Wave64 translation (no arbitrary half-wave approximation), full experimental guest ray tracing, native game display path, no synthetic ambient fill, and P0 memory tuning. No rendering flags or profile selection are required.
+
+The new shader policy rejects shaders it cannot translate for the host's supported wave width. This can leave missing draws or disable the all-or-none ray-tracing builder. It does not guarantee pixel-identical rendering or successful gameplay. The RTX build has not yet been hardware-validated. The upstream Radeon benchmarks below are historical, not RTX results.
+
+## Upstream reference: DexNom RayTime (AMD)
 
 DexNom RayTime is a community fork of Marvisak's VIctory for Windows x64. It runs an Xbox Series executable from your own game installation and translates its GPU work for Direct3D 12. This is our most complete tested build so far and the source for the FSR Quality 4K baseline. Game files, executables, saves and generated shader caches stay on your own computer.
 
