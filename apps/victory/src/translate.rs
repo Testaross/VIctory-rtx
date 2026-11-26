@@ -273,6 +273,7 @@ pub fn run(
     let kept = std::sync::Arc::new(Mutex::new(Vec::new()));
     let threads =
         jobs.unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| n.get()));
+    anyhow::ensure!(threads > 0, "shader worker count must be positive");
     let seen = Mutex::new(HashSet::new());
     let total = Mutex::new(Tally::default());
     for root in &paths {
@@ -448,9 +449,12 @@ pub fn precompile(paths: Vec<PathBuf>, jobs: Option<usize>) -> Result<()> {
         failed.values().map(|f| f.0).sum::<usize>(),
         started.elapsed().as_secs_f64()
     );
+    let failed_count: usize = failed.values().map(|f| f.0).sum();
     for (why, (n, hash)) in failed {
         println!("  {n:>5}  {why}  (e.g. {hash})");
     }
+    anyhow::ensure!(done.load(Ordering::Relaxed) > 0, "no shaders successfully cached");
+    anyhow::ensure!(failed_count == 0, "{failed_count} shaders failed translation");
     Ok(())
 }
 
