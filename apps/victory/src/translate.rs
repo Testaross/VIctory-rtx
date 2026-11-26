@@ -401,19 +401,39 @@ pub fn precompile(paths: Vec<PathBuf>, jobs: Option<usize>) -> Result<()> {
     let paths = crate::default_paths(paths)?;
     let threads =
         jobs.unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| n.get()));
+    anyhow::ensure!(threads > 0, "shader worker count must be positive");
     let started = std::time::Instant::now();
     let seen = Mutex::new(HashSet::new());
     let done = AtomicUsize::new(0);
     let failed = Mutex::new(BTreeMap::<String, (usize, String)>::new());
+    // Cache negative discovery results only. Shader-bearing files are still
+    // read so missing or corrupt compiled cache entries can be rebuilt.
+    let manifest_dir = cfg.cache_subdir("shader-discovery")?;
+    let mut skipped = 0usize;
     for root in &paths {
         for entry in walkdir::WalkDir::new(root).into_iter().filter_map(Result::ok) {
             if !entry.file_type().is_file() || entry.metadata().map_or(0, |m| m.len()) > MAX_FILE {
                 continue;
             }
-            let Ok(data) = std::fs::read(entry.path()) else {
+            let metadata = entry.metadata()?;
+            let modified = metadata.modified()?.duration_since(std::time::UNIX_EPOCH)?;
+            let mut key = blake3::Hasher::new();
+            key.update(entry.path().as_os_str().as_encoded_bytes());
+            key.update(&metadata.len().to_le_bytes());
+            key.update(&modified.as_nanos().to_le_bytes());
+            // Changing discovery code invalidates negative results.
+            key.update(include_bytes!("translate.rs"));
+            let marker = manifest_dir.join(key.finalize().to_hex().to_string());
+            if marker.is_file() {
+                skipped += 1;
                 continue;
-            };
+            }
+            let data = std::fs::read(entry.path())?;
             let jobs = sources(&data);
+            if jobs.is_empty() {
+                std::fs::write(marker, [])?;
+                continue;
+            }
             let next = AtomicUsize::new(0);
             std::thread::scope(|s| {
                 for _ in 0..threads.min(jobs.len()) {
@@ -442,6 +462,7 @@ pub fn precompile(paths: Vec<PathBuf>, jobs: Option<usize>) -> Result<()> {
             });
         }
     }
+    println!("{skipped} unchanged non-shader files skipped");
     let failed = failed.into_inner().unwrap_or_else(|e| e.into_inner());
     println!(
         "{} shaders in the cache, {} do not translate, {:.0} s",
