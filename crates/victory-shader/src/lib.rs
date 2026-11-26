@@ -18,6 +18,9 @@ pub mod resource;
 pub mod spill;
 pub mod structure;
 
+#[cfg(test)]
+mod wave64_reference;
+
 pub use dxbc::{Container, FourCC, Part};
 pub use dxil::{DxilProgram, ShaderKind, XboxExtras};
 pub use native::{
