@@ -8,8 +8,9 @@
 param(
     [ValidateSet('Baseline', 'StaticBVH')]
     [string] $Mode = 'Baseline',
-    [ValidateSet('Original', 'Residency', 'Throughput')]
+    [ValidateSet('Original', 'Residency', 'Throughput', 'P0')]
     [string] $MemoryProfile = 'Residency',
+    [switch] $StrictWave,
     [string] $InstallDir = (Join-Path $env:LOCALAPPDATA 'Victory RTX')
 )
 
@@ -25,10 +26,23 @@ $settings = @{
     VICTORY_ADAPTIVE_MEMORY = $(if ($MemoryProfile -eq 'Original') { '0' } else { '1' })
 }
 $launchArgs = @($rtFlag, '--console', 'series-x')
-if ($MemoryProfile -eq 'Throughput') {
+if ($MemoryProfile -in @('Throughput', 'P0')) {
     $settings['VICTORY_FILL_WORKERS'] = '4'
     $settings['VICTORY_PARALLEL_PRELUDES'] = '1'
     $launchArgs += '--local-gpu-memory'
+}
+if ($MemoryProfile -eq 'P0') {
+    # Capture changed bytes with their originating submission where supported;
+    # upstream falls back to its ordered readback path if capture is unavailable.
+    $settings['VICTORY_RELAY'] = '2'
+    $settings['VICTORY_CAPTURE_READBACKS'] = '1'
+}
+if ($StrictWave) {
+    # Never knowingly use the approximate two independent Wave32 halves.
+    # Unsupported shaders may be refused: keep this as a diagnostic A/B mode.
+    $settings['VICTORY_WAVE_LOCAL'] = 'idiom'
+    $settings['VICTORY_WAVE_WIDE'] = '0'
+    $settings['VICTORY_WAVE_WHY'] = '1'
 }
 $previous = @{}
 foreach ($key in $settings.Keys) {
