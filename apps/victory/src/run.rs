@@ -57,14 +57,13 @@ pub fn run(
         let shader_root = cfg.game_dir.clone().unwrap_or_else(|| {
             exe.parent().unwrap_or(Path::new(".")).to_path_buf()
         });
-        println!("Preparing GPU-specific shader cache...");
-        crate::translate::precompile_for_run(vec![shader_root])
-            .context("ahead-of-time shader preparation failed")?;
-        let pipeline_dir = cfg.cache_subdir("shaders")?.with_file_name("pipelines");
-        std::fs::create_dir_all(&pipeline_dir)?;
-        println!("Preparing previously recorded pipelines...");
-        crate::warm::run(None, None, false, false, None)
-            .context("ahead-of-time pipeline preparation failed")?;
+        println!("Preparing GPU-specific shader cache in a separate process...");
+        let status = std::process::Command::new(std::env::current_exe()?)
+            .arg("prepare-launch")
+            .arg(&shader_root)
+            .status()
+            .context("starting the ahead-of-time preparation worker")?;
+        anyhow::ensure!(status.success(), "ahead-of-time preparation worker exited with {status}");
     }
     let original = std::fs::read(exe).with_context(|| format!("reading {}", exe.display()))?;
     let prepared = victory_loader::prepare(&original)?;
