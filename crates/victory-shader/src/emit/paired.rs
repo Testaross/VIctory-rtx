@@ -110,7 +110,6 @@ mod tests {
         let at = s.entry;
         let lane = s.op(at, "waveGetLaneIndex", Attr::ReadOnly, s.t.i32, 111, &[]);
         let zero = s.m.i32(0);
-        let one = s.m.i32(1);
         let k31 = s.m.i32(31);
         let k32 = s.m.i32(32);
         let k63 = s.m.i32(63);
@@ -165,7 +164,5 @@ mod tests {
             let expected = [u32::from(n > 0), 1, 63, if n == 31 { 0 } else { n as u32 + 32 }];
             assert_eq!(&out[0][n * 4..n * 4 + 4], &expected);
         }
-        // Keep the low/high prefix checks above independent of host lane ordering.
-        let _ = one;
     }
 }
