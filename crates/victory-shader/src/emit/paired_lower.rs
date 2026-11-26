@@ -858,3 +858,109 @@ fn compare(name: &str) -> Option<u8> {
         _ => return None,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::native::{ComputeIo, HwStage, RootParam, UsedResource};
+
+    // Independently authored guest program: one writer in each wave,
+    // a wave-dependent scalar loop, a common barrier, then every lane
+    // stores the logical wave's result. Uses the real decoder and
+    // resource tracker, not hand-authored DXIL.
+    fn synthetic() -> NativeProgram {
+        let words = [
+            0xBE81_0380, // s_mov_b32 s1, 0
+            0xF408_0200, 0xFA00_0000, // s_load_dwordx4 s[8:11], s[0:1], 0
+            0xD765_0001, 0x0001_00C1, // v_mbcnt_lo_u32_b32 v1, -1, 0
+            0xD766_0001, 0x0002_02C1, // v_mbcnt_hi_u32_b32 v1, -1, v1
+            0xD760_0007, 0x0001_7F00, // v_readlane_b32 s7, v0, 63
+            0x7D84_02BF, // v_cmp_eq_u32 vcc, 63, v1
+            0xBE8C_246A, // s_and_saveexec_b64 s[12:13], vcc
+            0xBF88_0007, // s_cbranch_execz restore
+            0x3406_0082, // v_lshlrev_b32 v3, 2, v0
+            0xD834_0000, 0x0000_0003, // ds_write_b32 v3, v0
+            0xD8D8_0000, 0x0200_0003, // ds_read_b32 v2, v3
+            0xD760_0006, 0x0001_7F02, // v_readlane_b32 s6, v2, 63
+            0xBEFE_040C, // restore: s_mov_b64 exec, s[12:13]
+            0xBF06_BF07, // s_cmp_eq_u32 s7, 63
+            0xBF84_0004, // s_cbranch_scc0 meet
+            0x8106_8106, // loop: s_add_i32 s6, s6, 1
+            0xBF0A_FF06, 66, // s_cmp_lt_u32 s6, 66
+            0xBF85_FFFC, // s_cbranch_scc1 loop
+            0xBF8A_0000, // meet: s_barrier
+            0x7E02_0206, // v_mov_b32 v1, s6
+            0x3406_0082, // v_lshlrev_b32 v3, 2, v0
+            0xE070_1000, 0x8002_0103, // buffer_store_dword v1, v3, s[8:11], 0 offen
+            0xBF81_0000, // s_endpgm
+        ];
+        NativeProgram {
+            stage: HwStage::Cs, wave64: true, vgprs: 4,
+            layout: vec![RootParam {
+                root: RootType::Table, table_offset_dwords: 0, sgprs: 1,
+                base_register: 0, user_data: 0, slot: 0,
+            }],
+            used: vec![UsedResource {
+                kind: ResourceType::Uav, root: RootType::Table,
+                table_offset_dwords: 0, lower_bound: 0, stride: 1,
+                dwords: 4, user_data: 0, slot: 0,
+            }],
+            io: StageIo::Cs(ComputeIo { rsrc2: 2 | (1 << 15), threads: [128, 1, 1] }),
+            code: words.iter().flat_map(|w: &u32| w.to_le_bytes()).collect(),
+        }
+    }
+    fn translated() -> HostShader {
+        let native = synthetic();
+        let p = ir::build(&native.code, true, native.vgprs).expect("decode synthetic paired program");
+        let st = crate::structure::structure(&p).expect("structure");
+        let io = crate::io::raise(&p, &native).expect("IO");
+        let res = crate::resource::track(&p, &native.layout, native.stage, Some(&st)).expect("track");
+        lower(&native, &p, &io, &res).expect("paired lowering")
+    }
+
+    #[test]
+    fn paired_lower_emits_guest_loop_and_lds() {
+        let shader = translated();
+        assert!(!shader.dxil.is_empty());
+        assert_eq!(shader.user_data.len(), 1);
+        assert_eq!(shader.user_data[0].root, RootType::Table);
+        #[cfg(windows)]
+        if let Ok(mut v) = super::super::validator::Validator::load(super::super::validator::Validator::default_path().as_deref()) {
+            let mut copy = shader.dxil.clone();
+            v.validate(&mut copy).expect("paired scheduler DXIL validation failed");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn paired_lower_executes_guest_loop_and_lds() {
+        use super::super::host::{Dispatch, Host, Root, View};
+        let shader = translated();
+        let _one = super::super::valu_tests::ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        let Ok(host) = Host::new(false) else {
+            eprintln!("no hardware device; paired scheduler execution not tested");
+            return;
+        };
+        let (root, pso) = host.compute_pipeline(&shader).expect("paired scheduler pipeline");
+        let out = host.dispatch(&root, &pso, &Dispatch {
+            roots: vec![(0, Root::Constants(vec![0; 4]))],
+            views: &[View::RawUav(128)], samplers: &[], groups: [1, 1, 1],
+        }).expect("paired scheduler dispatch");
+        assert_eq!(out[0].len(), 128);
+        for (lane, v) in out[0].iter().enumerate() {
+            assert_eq!(*v, if lane < 64 { 66 } else { 127 }, "guest lane {lane}");
+        }
+    }
+
+    #[test]
+    fn paired_lower_refuses_different_barrier_paths() {
+        let mut native = synthetic();
+        // Replace the scalar branch over the loop with a branch over
+        // the barrier as well, so the barrier-order proof must refuse it.
+        let word = 0xBF84_0004u32.to_le_bytes();
+        let at = native.code.chunks_exact(4).position(|b| b == word).unwrap() * 4;
+        native.code[at..at+4].copy_from_slice(&0xBF84_0005u32.to_le_bytes());
+        let p = ir::build(&native.code, true, native.vgprs).expect("decode divergent barrier");
+        assert!(barrier_order(&p).is_err());
+    }
+}
