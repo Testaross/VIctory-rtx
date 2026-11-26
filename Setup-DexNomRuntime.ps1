@@ -1,13 +1,13 @@
 [CmdletBinding()]
 param(
     [string] $GamePath,
-    [string] $InstallDir = (Join-Path $env:LOCALAPPDATA 'DexNom Runtime'),
+    [string] $InstallDir = (Join-Path $env:LOCALAPPDATA 'Victory RTX'),
     [string] $ShortcutDirectory = [Environment]::GetFolderPath('Programs')
 )
 
 $ErrorActionPreference = 'Stop'
 if ($env:OS -ne 'Windows_NT' -or ![Environment]::Is64BitOperatingSystem) {
-    throw 'DexNom RayTime requires 64-bit Windows.'
+    throw 'Victory RTX requires 64-bit Windows.'
 }
 if (!(Get-Command rustup -ErrorAction SilentlyContinue) -or !(Get-Command cargo -ErrorAction SilentlyContinue)) {
     throw 'Install Rust for Windows from https://rustup.rs, then reopen Setup.cmd.'
@@ -61,7 +61,7 @@ $state = [IO.Directory]::CreateDirectory((Join-Path $InstallDir 'state'))
 try {
     $lock = [IO.File]::Open((Join-Path $state.FullName 'launcher.lock'), 'OpenOrCreate', 'Write', 'None')
 } catch [IO.IOException] {
-    throw "Could not lock the install directory. Close DexNom RayTime and shader preload before updating. $($_.Exception.Message)"
+    throw "Could not lock the install directory. Close Victory RTX and shader preload before updating. $($_.Exception.Message)"
 }
 try {
     foreach ($name in 'victory.exe','victory-play.exe','victory-warm.exe') {
@@ -76,22 +76,17 @@ try {
             }
         } finally { if ([IO.File]::Exists($temp)) { [IO.File]::Delete($temp) } }
     }
+    [IO.File]::Copy((Join-Path $PSScriptRoot 'Start-RTX.ps1'), (Join-Path $InstallDir 'Start-RTX.ps1'), $true)
     [IO.File]::WriteAllText($config, $game.FullName, [Text.UTF8Encoding]::new($false))
 } finally { $lock.Dispose() }
 
-$launcher = Join-Path $InstallDir 'victory-play.exe'
-Write-Host "Installed DexNom RayTime in $InstallDir"
+$launcher = Join-Path $InstallDir 'Start-RTX.ps1'
+Write-Host "Installed Victory RTX in $InstallDir"
 [IO.Directory]::CreateDirectory($ShortcutDirectory) | Out-Null
 $shell = New-Object -ComObject WScript.Shell
-foreach ($entry in @(
-    @{ Name = 'DexNom RayTime'; Arguments = '' }
-    @{ Name = 'DexNom RayTime (Experimental RT)'; Arguments = '--rt' }
-    @{ Name = 'DexNom RayTime (FSR Quality 4K)'; Arguments = '--rt --console series-x --local-gpu-memory --fsr-quality --sparse-textures --no-upload-ahead --capture-readbacks --rt-write-stats' }
-)) {
-    $shortcut = $shell.CreateShortcut((Join-Path $ShortcutDirectory ($entry.Name + '.lnk')))
-    $shortcut.TargetPath = $launcher
-    $shortcut.Arguments = $entry.Arguments
-    $shortcut.WorkingDirectory = $InstallDir
-    $shortcut.Save()
-}
-Write-Host "Open DexNom RayTime from $ShortcutDirectory. The FSR Quality 4K shortcut uses the tested ray-tracing profile."
+$shortcut = $shell.CreateShortcut((Join-Path $ShortcutDirectory 'Victory RTX.lnk'))
+$shortcut.TargetPath = (Join-Path $PSHOME 'powershell.exe')
+$shortcut.Arguments = '-NoLogo -NoProfile -ExecutionPolicy Bypass -File "' + $launcher + '" -InstallDir "' + $InstallDir + '"'
+$shortcut.WorkingDirectory = $InstallDir
+$shortcut.Save()
+Write-Host "Open Victory RTX from $ShortcutDirectory. No rendering profile selection is required."
