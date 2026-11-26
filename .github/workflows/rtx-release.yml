@@ -1,0 +1,26 @@
+name: Victory RTX release build
+
+on:
+  pull_request:
+  push:
+    branches: [main, ci/rtx-release-validation]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-release:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - name: Prepare verified format tables
+        shell: pwsh
+        run: ./Initialize-FormatTables.ps1
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install
+      - name: Build Windows runtime
+        run: cargo build --locked --release -p victory --features diagnostics --bins --target x86_64-pc-windows-msvc
+      - name: Shader translator tests
+        run: cargo test --locked -p victory-shader --features diagnostics
