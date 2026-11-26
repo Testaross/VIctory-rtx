@@ -165,7 +165,7 @@ pub fn translate_ray_probe(container: &[u8]) -> Result<HostShader, ShaderError> 
     }
 }
 
-/// Diagnostic storage for InitHeaders, after the page faults and ray probe.
+/// Diagnostic storage for a selected raw-writing compute shader, after page faults and the ray probe.
 pub const RAW_STORE_PROBE_HASH: &str = "3cea4534bbc15632";
 pub const RAW_STORE_PROBE_BASE: u32 = MEMORY_FAULTS + RAY_PROBE_DWORDS;
 pub const RAW_STORE_PROBE_CAPACITY: u32 = 4096;
@@ -175,12 +175,23 @@ pub const RAW_STORE_PROBE_EVENT_DWORDS: u32 = 5;
 /// slot and byte offset into that copy's host view.
 pub const RAW_STORE_PROBE_DWORDS: u32 = 2 + RAW_STORE_PROBE_CAPACITY * RAW_STORE_PROBE_EVENT_DWORDS;
 
+/// The selected shader's 16-character BLAKE3 prefix. This remains a
+/// developer-only validation facility; the normal strict renderer does
+/// not emit per-write diagnostic traffic.
+pub fn raw_store_probe_target() -> Option<&'static str> {
+    static TARGET: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    if !cfg!(feature = "diagnostics") {
+        return None;
+    }
+    TARGET.get_or_init(|| {
+        let value = std::env::var("VICTORY_CAPTURE_RAW_STORES").ok()?;
+        (value.len() == 16 && value.bytes().all(|b| b.is_ascii_hexdigit()))
+            .then(|| value.to_ascii_lowercase())
+    }).as_deref()
+}
+
 pub fn raw_store_probe_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    cfg!(feature = "diagnostics")
-        && *ENABLED.get_or_init(|| {
-            std::env::var("VICTORY_CAPTURE_RAW_STORES").as_deref() == Ok(RAW_STORE_PROBE_HASH)
-        })
+    raw_store_probe_target().is_some()
 }
 
 thread_local! {
