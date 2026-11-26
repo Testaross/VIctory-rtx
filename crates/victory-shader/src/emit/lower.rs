@@ -2895,10 +2895,10 @@ impl<'a> Lower<'a> {
         (h, byte, mapped, copy)
     }
 
-    /// Records the binding of an executed store with a mapped start address.
+    /// Records an executed raw store or atomic with a mapped start address.
     /// Use the very same copy slot and offset as the store. The high word is
     /// unmasked for diagnosis; the directory uses only its low eight bits.
-    fn trace_raw_store(&mut self, [lo, hi]: [V; 2], copy: V, byte: V, mapped: V, width: u32) {
+    fn trace_raw_write(&mut self, [lo, hi]: [V; 2], copy: V, byte: V, mapped: V, width: u32) {
         use super::{RAW_STORE_PROBE_BASE, RAW_STORE_PROBE_CAPACITY, RAW_STORE_PROBE_EVENT_DWORDS, SLOT_FAULTS};
 
         let active = self.begin_guarded(Some(mapped));
@@ -3026,7 +3026,7 @@ impl<'a> Lower<'a> {
             self.s
                 .op(self.cur, "rawBufferStore.i32", Attr::NoUnwind, void, 140, &args);
             if super::RAW_STORE_PROBE.get() {
-                self.trace_raw_store([lo, hi], copy, byte, mapped, u32::from(n) * 4);
+                self.trace_raw_write([lo, hi], copy, byte, mapped, u32::from(n) * 4);
             }
             self.end_guarded(at, &[]);
             self.s.writes_guest_memory = true;
@@ -3047,7 +3047,7 @@ impl<'a> Lower<'a> {
             Some(x) => self.i32_of(x)?,
             None => self.s.m.i32(0),
         };
-        let (h, byte, ..) = self.memory(lo, hi, guard);
+        let (h, byte, mapped, copy) = self.memory(lo, hi, guard);
         // DXIL's atomic operations: add 0, and 1, or 2, xor 3, signed
         // minimum 4 and maximum 5, unsigned 6 and 7, exchange 8.
         let simple = match op {
@@ -3133,6 +3133,11 @@ impl<'a> Lower<'a> {
                 found
             }
         };
+        // One record per executed atomic, not per compare-exchange retry.
+        // No-op atomics are conservatively marked as potential writes.
+        if super::RAW_STORE_PROBE.get() {
+            self.trace_raw_write([lo, hi], copy, byte, mapped, 4);
+        }
         let was = self.end_guarded(at, &[(was, old)])[0];
         self.s.writes_guest_memory = true;
         if let Some(reg) = back {
