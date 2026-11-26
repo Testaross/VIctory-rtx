@@ -447,5 +447,414 @@ impl Compiler<'_> {
         self.words.insert(key, v);
         Ok(v)
     }
-    // INSTRUCTION_METHODS
+    fn scalar(&mut self, st: &mut State, inst: &Inst) -> Result<()> {
+        let Fields::Sop { dst, src, imm: None } = &inst.fields else {
+            return Err(unsupported(inst.machine.offset, inst.name()));
+        };
+        let name = inst.name();
+        let bad = || unsupported(inst.machine.offset, name);
+        if let Some(cmp) = name.strip_prefix("s_cmp_") {
+            let op = compare(cmp).ok_or_else(bad)?;
+            let a = self.op(st, inst, src.first().ok_or_else(bad)?, 0, 0)?;
+            let b = self.op(st, inst, src.get(1).ok_or_else(bad)?, 0, 0)?;
+            let x = self.cmp(op, a, b);
+            self.set_scc(st, x);
+            return Ok(());
+        }
+        let Some(Operand::Scalar { code, dwords }) = *dst else { return Err(bad()); };
+        if code == NULL { return Err(bad()); }
+        let aop = src.first().ok_or_else(bad)?;
+        if name == "s_and_saveexec_b64" {
+            let a = self.scalar_mask(st, inst, aop)?;
+            let old = st.mask(EXEC);
+            let lo = self.bin(Bin::And, old.lo, a.lo);
+            let hi = self.bin(Bin::And, old.hi, a.hi);
+            let x = Pair { lo, hi };
+            st.set_mask(code, old);
+            st.set_mask(EXEC, x);
+            let any = x.any(&mut self.s, self.cur);
+            self.set_scc(st, any);
+            return Ok(());
+        }
+        if dwords == 2 && name.ends_with("_b64") {
+            let a = self.scalar_mask(st, inst, aop)?;
+            let x = if name == "s_mov_b64" { a } else {
+                let b = self.scalar_mask(st, inst, src.get(1).ok_or_else(bad)?)?;
+                let op = match name {
+                    "s_and_b64" | "s_andn2_b64" => Bin::And,
+                    "s_or_b64" => Bin::Or,
+                    "s_xor_b64" => Bin::Xor,
+                    _ => return Err(bad()),
+                };
+                let b = if name == "s_andn2_b64" {
+                    Pair { lo: self.not(b.lo), hi: self.not(b.hi) }
+                } else { b };
+                Pair { lo: self.bin(op, a.lo, b.lo), hi: self.bin(op, a.hi, b.hi) }
+            };
+            st.set_mask(code, x);
+            if inst.write(Reg::Scc).is_some() {
+                let any = x.any(&mut self.s, self.cur);
+                self.set_scc(st, any);
+            }
+            return Ok(());
+        }
+        if dwords != 1 { return Err(bad()); }
+        if name == "s_bcnt1_i32_b64" {
+            let a = self.scalar_mask(st, inst, aop)?;
+            let x = a.count(&mut self.s, self.cur);
+            st.put(Reg::S(code), 0, x);
+            if inst.write(Reg::Scc).is_some() {
+                let nz = self.nonzero(x); self.set_scc(st, nz);
+            }
+            return Ok(());
+        }
+        let a = self.op(st, inst, aop, 0, 0)?;
+        let (x, scc) = if name == "s_mov_b32" { (a, None) } else {
+            let b = self.op(st, inst, src.get(1).ok_or_else(bad)?, 0, 0)?;
+            let x = match name {
+                "s_and_b32" => self.bin(Bin::And, a, b),
+                "s_or_b32" => self.bin(Bin::Or, a, b),
+                "s_xor_b32" => self.bin(Bin::Xor, a, b),
+                "s_add_i32" | "s_add_u32" => self.bin(Bin::Add, a, b),
+                "s_lshl_b32" => {
+                    let mask = self.k(31);
+                    let shift = self.bin(Bin::And, b, mask);
+                    self.bin(Bin::Shl, a, shift)
+                }
+                _ => return Err(bad()),
+            };
+            let scc = match name {
+                "s_add_u32" => self.cmp(pred::IULT, x, a),
+                "s_add_i32" => {
+                    let ab = self.bin(Bin::Xor, a, b);
+                    let ax = self.bin(Bin::Xor, a, x);
+                    let ab = self.not(ab);
+                    let overflow = self.bin(Bin::And, ab, ax);
+                    let zero = self.k(0);
+                    self.cmp(pred::SLT, overflow, zero)
+                }
+                _ => self.nonzero(x),
+            };
+            (x, Some(scc))
+        };
+        st.put(Reg::S(code), 0, x);
+        if inst.write(Reg::Scc).is_some() {
+            self.set_scc(st, scc.ok_or_else(bad)?);
+        }
+        Ok(())
+    }
+
+    fn valu(&mut self, st: &mut State, inst: &Inst) -> Result<()> {
+        let Fields::Valu(v) = &inst.fields else { unreachable!() };
+        let name = inst.name();
+        let bad = || unsupported(inst.machine.offset, name);
+        if v.neg != 0 || v.abs != 0 || v.neg_hi != 0 || v.opsel != 0 || v.clamp || v.omod != 0 || v.sdwa.is_some() || v.dpp.is_some() || v.carry.is_some() {
+            return Err(bad());
+        }
+        let src = |n| v.src.get(n).ok_or_else(bad);
+        if let Some(rest) = name.strip_prefix("v_cmp_").or_else(|| name.strip_prefix("v_cmpx_")) {
+            let op = compare(rest).ok_or_else(bad)?;
+            let a = self.vector(st, inst, src(0)?)?;
+            let b = self.vector(st, inst, src(1)?)?;
+            let lo = self.cmp(op, a.lo, b.lo);
+            let hi = self.cmp(op, a.hi, b.hi);
+            let active_lo = self.active(st, 0);
+            let active_hi = self.active(st, 1);
+            let active = Pair {
+                lo: self.bin(Bin::And, lo, active_lo),
+                hi: self.bin(Bin::And, hi, active_hi),
+            };
+            let mask = Pair::ballot(&mut self.s, self.cur, active);
+            let dst = if name.starts_with("v_cmpx_") { EXEC } else {
+                let Some(Operand::Scalar { code, dwords: 2 }) = v.dst else { return Err(bad()); };
+                code
+            };
+            st.set_mask(dst, mask);
+            return Ok(());
+        }
+        if matches!(name, "v_readfirstlane_b32" | "v_readlane_b32") {
+            let Some(Operand::Scalar { code, dwords: 1 }) = v.dst else { return Err(bad()); };
+            let value = self.vector(st, inst, src(0)?)?;
+            let lane = if name == "v_readfirstlane_b32" {
+                let mask = st.mask(EXEC);
+                mask.first(&mut self.s, self.cur).0
+            } else {
+                let idx = self.op(st, inst, src(1)?, 0, 0)?;
+                let mask = self.k(63);
+                self.bin(Bin::And, idx, mask)
+            };
+            let x = value.read_lane(&mut self.s, self.cur, lane);
+            st.put(Reg::S(code), 0, x);
+            return Ok(());
+        }
+        let Some(Operand::Vector { reg, dwords: 1 }) = v.dst else { return Err(bad()); };
+        let a = self.vector(st, inst, src(0)?)?;
+        let mut out = [a.lo, a.hi];
+        for (half, result) in out.iter_mut().enumerate() {
+            let a = *result;
+            let x = match name {
+                "v_mov_b32" => a,
+                "v_not_b32" => self.not(a),
+                _ => {
+                    let b = self.op(st, inst, src(1)?, half, 0)?;
+                    match name {
+                        "v_add_nc_u32" => self.bin(Bin::Add, a, b),
+                        "v_sub_nc_u32" => self.bin(Bin::Sub, a, b),
+                        "v_subrev_nc_u32" => self.bin(Bin::Sub, b, a),
+                        "v_and_b32" => self.bin(Bin::And, a, b),
+                        "v_or_b32" => self.bin(Bin::Or, a, b),
+                        "v_xor_b32" => self.bin(Bin::Xor, a, b),
+                        "v_min_u32" | "v_max_u32" | "v_min_i32" | "v_max_i32" => {
+                            let op = match name {
+                                "v_min_u32" => pred::IULT, "v_max_u32" => pred::IUGT,
+                                "v_min_i32" => pred::SLT, _ => pred::SGT,
+                            };
+                            let take = self.cmp(op, a, b);
+                            self.s.m.select(self.cur, take, a, b)
+                        }
+                        "v_lshlrev_b32" | "v_lshrrev_b32" | "v_ashrrev_i32" => {
+                            let k31 = self.k(31);
+                            let shift = self.bin(Bin::And, a, k31);
+                            let op = match name {
+                                "v_lshlrev_b32" => Bin::Shl, "v_lshrrev_b32" => Bin::LShr, _ => Bin::AShr,
+                            };
+                            self.bin(op, b, shift)
+                        }
+                        "v_add3_u32" | "v_or3_b32" => {
+                            let c = self.op(st, inst, src(2)?, half, 0)?;
+                            let op = if name == "v_add3_u32" { Bin::Add } else { Bin::Or };
+                            let ab = self.bin(op, a, b);
+                            self.bin(op, ab, c)
+                        }
+                        "v_cndmask_b32" => {
+                            let m = self.scalar_mask(st, inst, src(2)?)?;
+                            let lane = self.lane;
+                            let word = if half == 0 { m.lo } else { m.hi };
+                            let take = mask_bit(&mut self.s, self.cur, word, None, lane);
+                            self.s.m.select(self.cur, take, b, a)
+                        }
+                        "v_mbcnt_lo_u32_b32" | "v_mbcnt_hi_u32_b32" => {
+                            let below = if name == "v_mbcnt_lo_u32_b32" { self.logical_lane(half) }
+                                else if half == 0 { self.k(0) } else { self.lane };
+                            let n = prefix_word(&mut self.s, self.cur, a, below);
+                            self.bin(Bin::Add, n, b)
+                        }
+                        _ => return Err(bad()),
+                    }
+                }
+            };
+            *result = x;
+        }
+        self.write_v(st, reg, Pair { lo: out[0], hi: out[1] });
+        Ok(())
+    }
+
+    /// Keep guest LDS bounds separate from scheduler scratch; invalid
+    /// guest addresses cannot overwrite program counters.
+    fn lds_address(&mut self, base: V, offset: u32, enabled: V) -> (V, V) {
+        let off = self.k(offset);
+        let byte = self.bin(Bin::Add, base, off);
+        let two = self.k(2);
+        let index = self.bin(Bin::LShr, byte, two);
+        let size = self.k(self.lds);
+        let inside = self.cmp(pred::IULT, index, size);
+        let guard = self.bin(Bin::And, inside, enabled);
+        (index, guard)
+    }
+    fn ds(&mut self, st: &mut State, inst: &Inst) -> Result<()> {
+        let Fields::Ds { dst, addr, data, offset0, offset1, gds } = &inst.fields else { unreachable!() };
+        let name = inst.name();
+        let bad = || unsupported(inst.machine.offset, name);
+        if *gds || self.lds == 0 { return Err(bad()); }
+        let addr = self.vector(st, inst, addr.as_ref().ok_or_else(bad)?)?;
+        let (read, write, atomic, offsets): (bool, bool, bool, Vec<u32>) = match name {
+            "ds_read_b32" => (true, false, false, vec![u32::from(*offset0) | u32::from(*offset1) << 8]),
+            "ds_write_b32" => (false, true, false, vec![u32::from(*offset0) | u32::from(*offset1) << 8]),
+            "ds_read2_b32" | "ds_read2st64_b32" | "ds_write2_b32" | "ds_write2st64_b32" => {
+                let scale = if name.contains("st64") { 256 } else { 4 };
+                (name.starts_with("ds_read"), name.starts_with("ds_write"), false,
+                 vec![u32::from(*offset0) * scale, u32::from(*offset1) * scale])
+            }
+            "ds_cmpst_rtn_b32" | "ds_add_rtn_u32" => (false, false, true, vec![u32::from(*offset0) | u32::from(*offset1) << 8]),
+            _ => return Err(bad()),
+        };
+        let dst = match *dst {
+            Some(Operand::Vector { reg, .. }) => Some(reg),
+            None if write => None,
+            _ => return Err(bad()),
+        };
+        let old_state = st.clone();
+        let shared = self.s.lds();
+        for half in 0..2 {
+            let base = if half == 0 { addr.lo } else { addr.hi };
+            let enabled = self.active(&old_state, half);
+            for (n, off) in offsets.iter().copied().enumerate() {
+                let (index, valid) = self.lds_address(base, off, enabled);
+                let reg = dst.map(|r| r.checked_add(n as u8).ok_or_else(bad)).transpose()?;
+                let old = reg.map(|r| old_state.get(Reg::V(r), half)).unwrap_or_else(|| self.k(0));
+                let zero = self.k(0);
+                let outside = self.s.m.select(self.cur, enabled, zero, old);
+                // Evaluate operands before entering a per-half conditional.
+                let value = if write {
+                    Some(self.op(&old_state, inst, data.get(n).ok_or_else(bad)?, half, 0)?)
+                } else if atomic {
+                    Some(self.op(&old_state, inst, data.first().ok_or_else(bad)?, half, 0)?)
+                } else { None };
+                let exchange = if name == "ds_cmpst_rtn_b32" {
+                    Some(self.op(&old_state, inst, data.get(1).ok_or_else(bad)?, half, 0)?)
+                } else { None };
+                let (pre, join) = self.guard(valid);
+                let ptr = self.s.m.element(self.cur, shared, index);
+                let result = if read {
+                    Some(self.s.m.load(self.cur, ptr))
+                } else if write {
+                    self.s.m.store(self.cur, ptr, value.ok_or_else(bad)?);
+                    None
+                } else if let Some(new) = exchange {
+                    Some(self.s.m.cmpxchg(self.cur, ptr, value.ok_or_else(bad)?, new))
+                } else {
+                    Some(self.s.m.atomic(self.cur, Rmw::Add, ptr, value.ok_or_else(bad)?))
+                };
+                let result = self.unguard(pre, join, result.map(|v| (v, outside)));
+                if let (Some(reg), Some(result)) = (reg, result) {
+                    st.put(Reg::V(reg), half, result);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Only fixed table descriptor loads are accepted. Descriptor bytes
+    /// cannot be read as ordinary data in this backend.
+    fn descriptor(&mut self, site: Site) -> Result<(V, ResourceType, u32)> {
+        let at = self.p.blocks[site.0].insts[site.1].machine.offset;
+        let bad = || unsupported(at, "paired descriptor is not a fixed table entry");
+        let desc = self.res.descriptors.iter().find(|d| d.site == site && d.role == Role::Resource).ok_or_else(bad)?;
+        let Source::Loaded { load, first } = &desc.source else { return Err(bad()); };
+        let (_, addr) = self.res.scalar.iter().find(|(s, _)| s == load).ok_or_else(bad)?;
+        let rp = self.native.layout.get(addr.param).ok_or_else(bad)?;
+        if rp.root != RootType::Table || addr.dynamic.is_some() { return Err(bad()); }
+        let byte = addr.offset.checked_add(u32::from(*first) * 4).ok_or_else(bad)?;
+        if !byte.is_multiple_of(32) { return Err(bad()); }
+        let used = self.native.used.iter().find(|u| u.root == RootType::Table && u.user_data == rp.user_data && u.table_offset_dwords == byte / 4).ok_or_else(bad)?;
+        let (kind, stride, slot) = (used.kind, used.stride, rp.slot);
+        let base = self.user(RootType::Table, slot, 0)?;
+        let offset = self.k(byte);
+        let address = self.bin(Bin::Add, base, offset);
+        let five = self.k(5);
+        let index = self.bin(Bin::LShr, address, five);
+        Ok((index, kind, stride))
+    }
+    fn smem(&mut self, st: &mut State, inst: &Inst, site: Site) -> Result<()> {
+        let Fields::Smem { data, offset, soffset, .. } = &inst.fields else { unreachable!() };
+        let name = inst.name();
+        let bad = || unsupported(inst.machine.offset, name);
+        if name.starts_with("s_load_dword") {
+            let (_, a) = self.res.scalar.iter().find(|(s, _)| *s == site).ok_or_else(bad)?;
+            if a.dynamic.is_some() || !self.native.layout.get(a.param).is_some_and(|p| p.root == RootType::Table) {
+                return Err(bad());
+            }
+            // The resource tracker resolves the descriptor's use. The
+            // SSA unavailable set rejects any attempt to read its bits.
+            return Ok(());
+        }
+        let count = dwords(name.strip_prefix("s_buffer_load_dword").ok_or_else(bad)?).ok_or_else(bad)?;
+        let Some(Operand::Scalar { code, .. }) = *data else { return Err(bad()); };
+        let (index, kind, _) = self.descriptor(site)?;
+        if kind != ResourceType::Cbv { return Err(bad()); }
+        if !matches!(soffset, Operand::Scalar { code: NULL, .. } | Operand::Const(128)) || *offset < 0 || *offset % 4 != 0 { return Err(bad()); }
+        let h = self.s.heap_handle(self.cur, index, false, false, (13, 65536));
+        for n in 0..count {
+            let dword = *offset as u32 / 4 + n as u32;
+            let row = self.k(dword / 4);
+            let r = self.s.op(self.cur, "cbufferLoadLegacy.i32", Attr::ReadOnly, self.s.t.cbuf_ret, 59, &[h, row]);
+            let value = self.s.m.extract(self.cur, r, dword % 4);
+            st.put(Reg::S(code.checked_add(n).ok_or_else(bad)?), 0, value);
+        }
+        Ok(())
+    }
+    fn buffer(&mut self, st: &mut State, inst: &Inst, site: Site) -> Result<()> {
+        let Fields::Buffer { data, addr, soffset, offset, offen, idxen, format, lds, tfe, .. } = &inst.fields else { unreachable!() };
+        let name = inst.name();
+        let bad = || unsupported(inst.machine.offset, name);
+        if format.is_some() || *lds || *tfe { return Err(bad()); }
+        let (store, count) = if let Some(n) = name.strip_prefix("buffer_store_dword") {
+            (true, dwords(n).ok_or_else(bad)?)
+        } else if let Some(n) = name.strip_prefix("buffer_load_dword") {
+            (false, dwords(n).ok_or_else(bad)?)
+        } else { return Err(bad()); };
+        let Some(Operand::Vector { reg, .. }) = *data else { return Err(bad()); };
+        let (index, kind, stride) = self.descriptor(site)?;
+        let uav = kind == ResourceType::Uav;
+        if !(uav || !store && kind == ResourceType::Srv) { return Err(bad()); }
+        let structured = stride > 1;
+        if structured && (stride < 4 || !stride.is_multiple_of(4) || (!*idxen && *offen)) {
+            return Err(bad());
+        }
+        let props = (if structured { 12 } else { 11 } | if uav { 0x1000 } else { 0 }, if structured { stride } else { 0 });
+        let handle = self.s.heap_handle(self.cur, index, false, false, props);
+        let old_state = st.clone();
+        for half in 0..2 {
+            let so = self.op(&old_state, inst, soffset, 0, 0)?;
+            let imm = self.k(u32::from(*offset));
+            let mut off = self.bin(Bin::Add, so, imm);
+            if *offen {
+                let v = self.op(&old_state, inst, addr, half, u8::from(*idxen))?;
+                off = self.bin(Bin::Add, off, v);
+            }
+            let idx = if *idxen { self.op(&old_state, inst, addr, half, 0)? } else { self.k(0) };
+            let undef = self.s.m.undef(self.s.t.i32);
+            let (a, b) = if structured { (idx, off) } else {
+                let byte = self.bin(Bin::Add, idx, off);
+                (byte, undef)
+            };
+            let mask = self.s.m.i8((1u8 << count) - 1);
+            let align = self.k(4);
+            let mut vals = Vec::new();
+            if store {
+                for n in 0..count {
+                    vals.push(self.read(&old_state, inst, Reg::V(reg.checked_add(n).ok_or_else(bad)?), half)?);
+                }
+            }
+            let active = self.active(&old_state, half);
+            let (pre, join) = self.guard(active);
+            if store {
+                vals.resize(4, undef);
+                self.s.op(self.cur, "rawBufferStore.i32", Attr::NoUnwind, self.s.t.void, 140,
+                    &[handle, a, b, vals[0], vals[1], vals[2], vals[3], mask, align]);
+                self.unguard(pre, join, None);
+            } else {
+                let ty = self.s.m.named_struct("dx.types.ResRet.i32", vec![self.s.t.i32; 5]);
+                let r = self.s.op(self.cur, "rawBufferLoad.i32", Attr::ReadOnly, ty, 139, &[handle, a, b, mask, align]);
+                let body = self.cur;
+                let mut values = Vec::new();
+                for n in 0..count { values.push(self.s.m.extract(body, r, u32::from(n))); }
+                self.unguard(pre, join, None);
+                for (n, value) in values.into_iter().enumerate() {
+                    let r = reg.checked_add(n as u8).ok_or_else(bad)?;
+                    let old = old_state.get(Reg::V(r), half);
+                    let phi = self.s.m.phi(join, self.s.t.i32);
+                    self.s.m.set_phi(phi, vec![(old, pre), (value, body)]);
+                    st.put(Reg::V(r), half, phi);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn dwords(s: &str) -> Option<u8> {
+    match s { "" => Some(1), "x2" => Some(2), "x3" => Some(3), "x4" => Some(4), _ => None }
+}
+fn compare(name: &str) -> Option<u8> {
+    let (op, ty) = name.rsplit_once('_')?;
+    if !matches!(ty, "u32" | "i32") { return None; }
+    Some(match op {
+        "eq" => pred::EQ, "ne" | "lg" => pred::NE,
+        "lt" => if ty == "i32" { pred::SLT } else { pred::IULT },
+        "le" => if ty == "i32" { pred::SLE } else { pred::IULE },
+        "gt" => if ty == "i32" { pred::SGT } else { pred::IUGT },
+        "ge" => if ty == "i32" { pred::SGE } else { pred::IUGE },
+        _ => return None,
+    })
 }
