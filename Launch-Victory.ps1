@@ -47,25 +47,53 @@ if (Test-Path -LiteralPath $settings) {
         $exe.Text = $saved.exe
     } catch { $status.Text = 'Saved settings could not be loaded.' }
 }
+function Test-GameDirectory([string]$path) {
+    return (-not [string]::IsNullOrWhiteSpace($path)) -and (Test-Path -LiteralPath $path -PathType Container)
+}
 $browseFolder.Add_Click({
-    $dialog = New-Object Windows.Forms.FolderBrowserDialog
+    $dialog = $null
     try {
-        if (Test-Path -LiteralPath $folder.Text -PathType Container) { $dialog.SelectedPath = $folder.Text }
-        if ($dialog.ShowDialog($form) -eq 'OK') { $folder.Text = $dialog.SelectedPath }
-    } finally { $dialog.Dispose() }
+        $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+        $dialog.Description = 'Select your game folder'
+        $dialog.ShowNewFolderButton = $false
+        if (Test-GameDirectory $folder.Text) { $dialog.SelectedPath = $folder.Text }
+        if ($dialog.ShowDialog($form) -eq [System.Windows.Forms.DialogResult]::OK) {
+            $folder.Text = $dialog.SelectedPath
+            $status.Text = 'Game folder selected. Now choose the executable.'
+        }
+    } catch {
+        [void][System.Windows.Forms.MessageBox]::Show($form, $_.Exception.Message, 'Folder picker')
+    } finally {
+        if ($null -ne $dialog) { $dialog.Dispose() }
+    }
 })
 $browseExe.Add_Click({
-    $dialog = New-Object Windows.Forms.OpenFileDialog
+    $dialog = $null
     try {
+        $dialog = New-Object System.Windows.Forms.OpenFileDialog
+        $dialog.Title = 'Select the game executable'
         $dialog.Filter = 'Game executable (*.exe)|*.exe'
-        if (Test-Path -LiteralPath $folder.Text -PathType Container) { $dialog.InitialDirectory = $folder.Text }
-        if ($dialog.ShowDialog($form) -eq 'OK') { $exe.Text = $dialog.FileName }
-    } finally { $dialog.Dispose() }
+        $dialog.CheckFileExists = $true
+        $dialog.Multiselect = $false
+        $dialog.RestoreDirectory = $true
+        if (Test-GameDirectory $folder.Text) { $dialog.InitialDirectory = $folder.Text }
+        if ($dialog.ShowDialog($form) -eq [System.Windows.Forms.DialogResult]::OK) {
+            $exe.Text = $dialog.FileName
+            if ([string]::IsNullOrWhiteSpace($folder.Text)) {
+                $folder.Text = [System.IO.Path]::GetDirectoryName($dialog.FileName)
+            }
+            $status.Text = 'Executable selected. Verify the game folder, then launch.'
+        }
+    } catch {
+        [void][System.Windows.Forms.MessageBox]::Show($form, $_.Exception.Message, 'Executable picker')
+    } finally {
+        if ($null -ne $dialog) { $dialog.Dispose() }
+    }
 })
 $launch.Add_Click({
     try {
-        if (!(Test-Path -LiteralPath $folder.Text -PathType Container)) { throw 'Select a valid game folder.' }
-        if (!(Test-Path -LiteralPath $exe.Text -PathType Leaf) -or [IO.Path]::GetExtension($exe.Text) -ne '.exe') { throw 'Select a valid game executable.' }
+        if (!(Test-GameDirectory $folder.Text)) { throw 'Select a valid game folder.' }
+        if ([string]::IsNullOrWhiteSpace($exe.Text) -or !(Test-Path -LiteralPath $exe.Text -PathType Leaf) -or [IO.Path]::GetExtension($exe.Text) -ne '.exe') { throw 'Select a valid game executable.' }
         $game = (Get-Item -LiteralPath $folder.Text).FullName
         $title = (Get-Item -LiteralPath $exe.Text).FullName
         $prefix = $game.TrimEnd([char]92) + [char]92
