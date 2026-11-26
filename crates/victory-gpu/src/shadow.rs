@@ -159,6 +159,32 @@ fn card_limits() -> (u64, u64) {
     })
 }
 
+/// Opt-in, vendor-independent residency tuning using the actual adapter's
+/// OS budget, not its advertised VRAM or a vendor/device ID.
+fn adaptive_memory() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_ADAPTIVE_MEMORY").is_some_and(|v| v == "1"))
+}
+
+fn adaptive_caps(budget: u64) -> (u64, u64) {
+    const GIB: u64 = 1 << 30;
+    if budget < 8 * GIB {
+        return (GIB, 0);
+    }
+    ((budget / 6).clamp(GIB, 4 * GIB), (budget / 12).min(2 * GIB))
+}
+
+#[cfg(test)]
+#[test]
+fn adaptive_residency_caps_are_bounded_and_conservative() {
+    const GIB: u64 = 1 << 30;
+    assert_eq!(adaptive_caps(0), (GIB, 0));
+    assert_eq!(adaptive_caps(6 * GIB), (GIB, 0));
+    assert_eq!(adaptive_caps(12 * GIB), (2 * GIB, GIB));
+    assert_eq!(adaptive_caps(24 * GIB), (4 * GIB, 2 * GIB));
+    assert_eq!(adaptive_caps(80 * GIB), (4 * GIB, 2 * GIB));
+}
+
 /// Bytes alive of copies' card sides, and of their "before" twins.
 static CARD_BYTES: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
 
@@ -197,7 +223,7 @@ fn card_for(size: u64) -> Option<ID3D12Resource> {
     if !cards() {
         return None;
     }
-    let (least, most) = card_limits();
+    let (least, mut most) = card_limits();
     if size < least || size >= 1 << 30 {
         return None;
     }
@@ -211,10 +237,13 @@ fn card_for(size: u64) -> Option<ID3D12Resource> {
     // queue's own rule (`resource::room`: nine tenths of the budget) counts
     // them, so the card's use stays where it was and the textures' share
     // shrinks by the copies' bytes, at most `card_limits`' second number.
-    if let Some([budget, used, ..]) = host.video_memory()
-        && used + size > budget / 10 * 8
-    {
-        return None;
+    if let Some([budget, used, ..]) = host.video_memory() {
+        if budget == 0 || size > (budget / 10 * 8).saturating_sub(used) {
+            return None;
+        }
+        if adaptive_memory() && std::env::var_os("VICTORY_CARD_BUFFERS_MB").is_none() {
+            most = adaptive_caps(budget).0;
+        }
     }
     if CARD_BYTES[0].fetch_add(size, Ordering::Relaxed) + size > most {
         CARD_BYTES[0].fetch_sub(size, Ordering::Relaxed);
@@ -258,17 +287,24 @@ static WINDOW_CARD_BYTES: AtomicU64 = AtomicU64::new(0);
 /// A buffer in the card's memory for a window of `size` bytes, if it is to
 /// be there ([`window_card_most`]).
 fn window_card_for(size: u64) -> Option<ID3D12Resource> {
-    let most = window_card_most();
-    if most == 0 || !cards() {
+    let mut most = window_card_most();
+    let adaptive = adaptive_memory() && std::env::var_os("VICTORY_CARD_WINDOWS_MB").is_none();
+    if (!adaptive && most == 0) || !cards() {
         return None;
     }
     let host = host()?;
     if !host.card_ready() {
         return None;
     }
-    if let Some([budget, used, ..]) = host.video_memory()
-        && used + size > budget / 10 * 8
-    {
+    if let Some([budget, used, ..]) = host.video_memory() {
+        if budget == 0 || size > (budget / 10 * 8).saturating_sub(used) {
+            return None;
+        }
+        if adaptive {
+            most = adaptive_caps(budget).1;
+        }
+    }
+    if most == 0 {
         return None;
     }
     if WINDOW_CARD_BYTES.fetch_add(size, Ordering::Relaxed) + size > most {
