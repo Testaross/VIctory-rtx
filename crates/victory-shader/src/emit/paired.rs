@@ -176,7 +176,7 @@ mod tests {
             root_cbvs: Vec::new(),
             root_srvs: Vec::new(),
             root_uavs: Vec::new(),
-            root_indexed_views: false,
+            root_indexed_views: Vec::new(),
         };
         let _one = super::super::valu_tests::ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
         let Ok(host) = Host::new(false) else {
@@ -299,7 +299,7 @@ mod tests {
             stage: crate::HwStage::Cs, dxil,
             user_data: Vec::new(), samplers: Vec::new(), static_samplers: Vec::new(),
             root_cbvs: Vec::new(), root_srvs: Vec::new(), root_uavs: Vec::new(),
-            root_indexed_views: false,
+            root_indexed_views: Vec::new(),
         };
         let _one = super::super::valu_tests::ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
         let Ok(host) = Host::new(false) else {
