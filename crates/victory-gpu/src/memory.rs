@@ -130,11 +130,25 @@ impl Writes {
     }
 
     fn owned(&self, pages: &BTreeMap<u64, usize>, mut visit: impl FnMut(usize, u64, u64)) {
+        // Coalesce adjacent pages owned by the same backing. This retains
+        // the exact byte union and never bridges an unmapped or aliased page.
+        // A large bounded builder output then needs one deferred write
+        // declaration per contiguous backing range, not one per 64 KiB.
+        let mut pending: Option<(usize, u64, u64)> = None;
         self.pages(|at, len| {
-            if let Some(&owner) = pages.get(&(at / PAGE)) {
-                visit(owner, at, len);
+            let owner = pages.get(&(at / PAGE)).copied();
+            if let Some((previous, start, bytes)) = pending {
+                if owner == Some(previous) && start.checked_add(bytes) == Some(at) {
+                    pending = Some((previous, start, bytes + len));
+                    return;
+                }
+                visit(previous, start, bytes);
             }
+            pending = owner.map(|owner| (owner, at, len));
         });
+        if let Some((owner, at, len)) = pending {
+            visit(owner, at, len);
+        }
     }
 }
 
@@ -762,6 +776,20 @@ mod tests {
             parts([(limit - 4, 24), ((1 << 40) - 4, 24)]),
             [(8, limit - 4, 4), (6, 0, 20)]
         );
+    }
+
+    #[test]
+    fn bounded_writes_coalesce_only_contiguous_pages_of_the_same_owner() {
+        use super::{BTreeMap, Writes};
+        let pages = BTreeMap::from([(0, 2), (1, 2), (2, 2), (4, 2), (5, 3)]);
+        let mut output = Vec::new();
+        Writes::Ranges([(PAGE - 4, 5 * PAGE), (0, 0)])
+            .owned(&pages, |owner, at, len| output.push((owner, at, len)));
+        assert_eq!(output, [
+            (2, PAGE - 4, 2 * PAGE + 4),
+            (2, 4 * PAGE, PAGE),
+            (3, 5 * PAGE, PAGE - 4),
+        ]);
     }
 
     #[test]
