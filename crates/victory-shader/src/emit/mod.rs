@@ -92,6 +92,7 @@ mod intersect_tests;
 pub mod host;
 mod lower;
 mod own_bits;
+mod paired;
 #[cfg(all(test, windows))]
 mod permlane_tests;
 mod rect;
