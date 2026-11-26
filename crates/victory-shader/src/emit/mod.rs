@@ -93,6 +93,7 @@ pub mod host;
 mod lower;
 mod own_bits;
 mod paired;
+mod paired_lower;
 #[cfg(all(test, windows))]
 mod permlane_tests;
 mod rect;
@@ -525,6 +526,18 @@ pub fn emit(
             if done(&again) {
                 return again.map(|(shader, _)| shader);
             }
+        }
+        // Last exact fallback: preserve the original scalar control flow and
+        // logical Wave64 masks. The scheduler never puts group barriers inside
+        // wave-dependent branches. Refuse unimplemented instructions rather
+        // than emitting an approximation.
+        match paired_lower::lower(native, p, io, res) {
+            Ok(shader) => {
+                if why { eprintln!("WAVE64-RETRY paired scheduler: wave Some(32)"); }
+                return Ok(shader);
+            }
+            Err(e) if why => eprintln!("WAVE64-RETRY paired scheduler: {e}"),
+            Err(_) => {}
         }
     }
     // SCC of a mask operation joined with a scalar test behind a per-lane skip (the 32-lane
