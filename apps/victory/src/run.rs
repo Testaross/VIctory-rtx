@@ -58,7 +58,7 @@ pub fn run(
             exe.parent().unwrap_or(Path::new(".")).to_path_buf()
         });
         println!("Preparing GPU-specific shader cache...");
-        crate::translate::precompile(vec![shader_root], None)
+        crate::translate::precompile_for_run(vec![shader_root])
             .context("ahead-of-time shader preparation failed")?;
         let pipeline_dir = cfg.cache_subdir("shaders")?.with_file_name("pipelines");
         std::fs::create_dir_all(&pipeline_dir)?;
